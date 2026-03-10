@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useEditorStore } from '../../stores/editorStore';
 import { api } from '../../ipc/ipcClient';
@@ -121,7 +121,7 @@ const TreeNode: React.FC<{
     onContextMenu(e, node);
   };
 
-  const icon = node.type === 'folder' ? (expanded ? '\u25BE' : '\u25B8') : node.type === 'suite' ? '\u25A3' : '\u25A0';
+  const icon = node.type === 'folder' ? (expanded ? '▾' : '▸') : node.type === 'suite' ? '▣' : '▪';
   const iconColor = node.type === 'folder' ? 'text-km-warning' : node.type === 'suite' ? 'text-km-success' : 'text-km-accent';
 
   return (
@@ -166,17 +166,25 @@ export const ProjectExplorer: React.FC = () => {
   const inputContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // 상하 분할 비율 (px 기준, top panel 높이)
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [topHeight, setTopHeight] = useState<number | null>(null); // null = 50%
+  const isDragging = useRef(false);
+
+  // 파일 트리 분리: Test Cases / Test Suites
+  const testCasesTree = fileTree.filter((n) => !n.path.startsWith('Test Suites'));
+  const testSuitesTree = fileTree.filter((n) => n.path.startsWith('Test Suites'));
+
   // 인풋 노출 시 포커스
   useEffect(() => {
     if (showInput) {
-      // 렌더링 후 포커스 보장
       requestAnimationFrame(() => {
         inputRef.current?.focus();
       });
     }
   }, [showInput]);
 
-  // Click outside input to cancel (mouseup 사용 — mousedown은 인풋 클릭을 방해함)
+  // Click outside input to cancel
   useEffect(() => {
     if (!showInput) return;
     const handleClickOutside = (e: MouseEvent) => {
@@ -219,25 +227,122 @@ export const ProjectExplorer: React.FC = () => {
     setContextMenu({ x: e.clientX, y: e.clientY, node });
   };
 
+  // 드래그 리사이즈
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDragging.current = true;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isDragging.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      // header 영역(약 28px) 제외
+      const relY = ev.clientY - rect.top - 28;
+      const maxH = rect.height - 28 - 4; // 4px divider
+      const clamped = Math.max(60, Math.min(relY, maxH - 60));
+      setTopHeight(clamped);
+    };
+
+    const onMouseUp = () => {
+      isDragging.current = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, []);
+
   return (
-    <div className="w-60 bg-km-sidebar border-r border-km-border flex flex-col h-full">
-      <div className="px-3 py-2 text-xs font-semibold text-km-text-dim uppercase tracking-wider flex items-center justify-between">
-        <span>Explorer</span>
-        <div className="flex gap-1">
-          <button
-            onClick={() => setShowInput('file')}
-            title="New Test Case"
-            className="text-km-text-dim hover:text-white text-base leading-none"
-          >
-            +
-          </button>
-          <button
-            onClick={() => setShowInput('folder')}
-            title="New Folder"
-            className="text-km-text-dim hover:text-white text-base leading-none"
-          >
-            +F
-          </button>
+    <div ref={containerRef} className="w-60 bg-km-sidebar border-r border-km-border flex flex-col h-full">
+      {/* 전체 헤더 */}
+      <div className="px-3 py-2 text-xs font-semibold text-km-text-dim uppercase tracking-wider shrink-0">
+        Explorer
+      </div>
+
+      {/* ── 상단: Test Cases ── */}
+      <div
+        className="flex flex-col overflow-hidden"
+        style={topHeight !== null ? { height: topHeight, flexShrink: 0 } : { flex: 1 }}
+      >
+        {/* 섹션 헤더 */}
+        <div className="px-3 py-1 text-xs font-semibold text-km-text-dim flex items-center justify-between shrink-0 border-b border-km-border/40">
+          <span>Test Cases</span>
+          <div className="flex gap-1">
+            <button
+              onClick={() => setShowInput('file')}
+              title="New Test Case"
+              className="text-km-text-dim hover:text-white text-base leading-none"
+            >
+              +
+            </button>
+            <button
+              onClick={() => setShowInput('folder')}
+              title="New Folder"
+              className="text-km-text-dim hover:text-white text-base leading-none"
+            >
+              +F
+            </button>
+          </div>
+        </div>
+
+        {showInput && showInput !== 'suite' && (
+          <div ref={inputContainerRef} className="px-2 py-1 shrink-0">
+            <div className="text-xs text-km-text-dim mb-1">
+              in: {selectedFolder || 'Test Cases'}
+            </div>
+            <input
+              ref={inputRef}
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreate();
+                if (e.key === 'Escape') { setShowInput(null); setNewName(''); }
+              }}
+              placeholder={showInput === 'folder' ? 'Folder name' : 'TestCase.groovy'}
+              className="w-full bg-km-bg border border-km-accent rounded px-2 py-1 text-xs text-white focus:outline-none"
+            />
+          </div>
+        )}
+
+        <div className="flex-1 overflow-y-auto py-1">
+          {config && (
+            <div
+              onClick={() => setSelectedFolder('Test Cases')}
+              className={`px-2 py-1 text-sm font-medium text-white cursor-pointer hover:bg-km-border/50 ${
+                selectedFolder === 'Test Cases' ? 'bg-km-accent/20' : ''
+              }`}
+            >
+              {config.name}
+              <span className="ml-2 text-xs text-km-text-dim">({config.type})</span>
+            </div>
+          )}
+          {testCasesTree.map((node) => (
+            <TreeNode
+              key={node.id}
+              node={node}
+              projectPath={projectPath!}
+              depth={0}
+              selectedFolder={selectedFolder}
+              onSelectFolder={setSelectedFolder}
+              onContextMenu={handleContextMenu}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* ── 드래그 핸들 ── */}
+      <div
+        onMouseDown={handleDividerMouseDown}
+        className="h-1 bg-km-border hover:bg-km-accent/60 cursor-row-resize shrink-0 transition-colors"
+        title="Drag to resize"
+      />
+
+      {/* ── 하단: Test Suites ── */}
+      <div className="flex flex-col overflow-hidden flex-1">
+        {/* 섹션 헤더 */}
+        <div className="px-3 py-1 text-xs font-semibold text-km-text-dim flex items-center justify-between shrink-0 border-b border-km-border/40">
+          <span>Test Suites</span>
           <button
             onClick={() => setShowInput('suite')}
             title="New Test Suite"
@@ -246,51 +351,40 @@ export const ProjectExplorer: React.FC = () => {
             +S
           </button>
         </div>
-      </div>
 
-      {showInput && (
-        <div ref={inputContainerRef} className="px-2 py-1">
-          <div className="text-xs text-km-text-dim mb-1">
-            in: {selectedFolder || 'Test Cases'}
-          </div>
-          <input
-            ref={inputRef}
-            type="text"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleCreate();
-              if (e.key === 'Escape') { setShowInput(null); setNewName(''); }
-            }}
-            placeholder={showInput === 'folder' ? 'Folder name' : showInput === 'suite' ? 'MySuite.suite' : 'TestCase.groovy'}
-            className="w-full bg-km-bg border border-km-accent rounded px-2 py-1 text-xs text-white focus:outline-none"
-          />
-        </div>
-      )}
-
-      <div className="flex-1 overflow-y-auto py-1">
-        {config && (
-          <div
-            onClick={() => setSelectedFolder('Test Cases')}
-            className={`px-2 py-1 text-sm font-medium text-white cursor-pointer hover:bg-km-border/50 ${
-              selectedFolder === 'Test Cases' ? 'bg-km-accent/20' : ''
-            }`}
-          >
-            {config.name}
-            <span className="ml-2 text-xs text-km-text-dim">({config.type})</span>
+        {showInput === 'suite' && (
+          <div ref={inputContainerRef} className="px-2 py-1 shrink-0">
+            <input
+              ref={inputRef}
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreate();
+                if (e.key === 'Escape') { setShowInput(null); setNewName(''); }
+              }}
+              placeholder="MySuite.suite"
+              className="w-full bg-km-bg border border-km-accent rounded px-2 py-1 text-xs text-white focus:outline-none"
+            />
           </div>
         )}
-        {fileTree.map((node) => (
-          <TreeNode
-            key={node.id}
-            node={node}
-            projectPath={projectPath!}
-            depth={0}
-            selectedFolder={selectedFolder}
-            onSelectFolder={setSelectedFolder}
-            onContextMenu={handleContextMenu}
-          />
-        ))}
+
+        <div className="flex-1 overflow-y-auto py-1">
+          {testSuitesTree.map((node) => (
+            <TreeNode
+              key={node.id}
+              node={node}
+              projectPath={projectPath!}
+              depth={0}
+              selectedFolder={selectedFolder}
+              onSelectFolder={setSelectedFolder}
+              onContextMenu={handleContextMenu}
+            />
+          ))}
+          {testSuitesTree.length === 0 && (
+            <div className="px-3 py-2 text-xs text-km-text-dim italic">No suites yet</div>
+          )}
+        </div>
       </div>
 
       {contextMenu && projectPath && (

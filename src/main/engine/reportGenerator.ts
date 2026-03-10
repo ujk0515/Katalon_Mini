@@ -67,11 +67,14 @@ function buildReportHtml(result: SuiteResult): string {
   .tc-details { display: none; padding: 0 16px 12px; }
   .tc-details.open { display: block; }
   .step-table { width: 100%; font-size: 13px; border-collapse: collapse; table-layout: fixed; }
-  .step-table th { text-align: left; padding: 6px 8px; color: #8892b0; border-bottom: 1px solid #2d2d44; }
-  .step-table th:nth-child(1) { width: 36px; }
-  .step-table th:nth-child(3) { width: 48px; }
-  .step-table th:nth-child(4) { width: 52px; }
-  .step-table td { padding: 6px 8px; border-bottom: 1px solid #2d2d44; word-break: break-all; }
+  .step-table th { text-align: left; padding: 6px 8px; color: #8892b0; border-bottom: 1px solid #2d2d44; white-space: nowrap; }
+  .step-table th:nth-child(1) { width: 40px; }
+  .step-table th:nth-child(2) { width: auto; }
+  .step-table th:nth-child(3) { width: 50px; }
+  .step-table th:nth-child(4) { width: 50px; }
+  .step-table td { padding: 6px 8px; border-bottom: 1px solid #2d2d44; vertical-align: top; }
+  .step-table td:nth-child(2) { word-break: break-all; overflow-wrap: anywhere; }
+  .step-table td:nth-child(3), .step-table td:nth-child(4) { white-space: nowrap; }
   .step-pass { color: #22c55e; }
   .step-fail { color: #ef4444; }
   .error-box { margin-top: 8px; padding: 8px 12px; background: #2d1b1b; border-left: 3px solid #ef4444; border-radius: 4px; font-size: 13px; color: #ef4444; white-space: pre-wrap; word-break: break-all; }

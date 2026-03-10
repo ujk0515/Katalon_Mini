@@ -19,6 +19,7 @@ interface EditorStore {
   updateContent: (id: string, content: string) => void;
   saveFile: (projectPath: string, id: string) => Promise<void>;
   getActiveContent: () => string;
+  reorderTab: (fromId: string, toIndex: number) => void;
 }
 
 export const useEditorStore = create<EditorStore>((set, get) => ({
@@ -81,5 +82,16 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     const { openTabs, activeTabId } = get();
     const tab = openTabs.find((t) => t.id === activeTabId);
     return tab?.content ?? '';
+  },
+
+  reorderTab: (fromId, toIndex) => {
+    const { openTabs } = get();
+    const fromIndex = openTabs.findIndex((t) => t.id === fromId);
+    if (fromIndex === -1 || fromIndex === toIndex) return;
+    const arr = [...openTabs];
+    const [item] = arr.splice(fromIndex, 1);
+    const insertAt = toIndex > fromIndex ? toIndex - 1 : toIndex;
+    arr.splice(insertAt, 0, item);
+    set({ openTabs: arr });
   },
 }));
