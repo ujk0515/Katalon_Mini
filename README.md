@@ -1,1 +1,0 @@
-# Katalon_Mini
