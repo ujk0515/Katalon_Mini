@@ -32,6 +32,9 @@
     "directories": {
       "output": "release"
     },
+    "win": {
+      "target": "nsis"
+    },
     "mac": {
       "target": "dmg"
     }
