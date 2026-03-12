@@ -23,6 +23,19 @@
     "uuid": "^10.0.0",
     "zustand": "^4.5.4"
   },
+  "build": {
+    "appId": "com.katalon.mini",
+    "productName": "Katalon Mini",
+    "files": [
+      "dist/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "target": "dmg"
+    }
+  },
   "devDependencies": {
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
