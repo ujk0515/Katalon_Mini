@@ -72,7 +72,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     set((state) => ({
       openTabs: state.openTabs.map((t) =>
         t.id === id
-          ? { ...t, isDirty: false, content: result?.converted ? result.content : t.content }
+          ? { ...t, isDirty: false, content: result?.cleaned ? result.content : t.content }
           : t
       ),
     }));

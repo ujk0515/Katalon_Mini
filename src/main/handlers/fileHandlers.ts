@@ -1,16 +1,6 @@
 import { ipcMain } from 'electron';
 import { IPC_CHANNELS } from '../../shared/types/ipc';
 import * as fileService from '../services/fileService';
-import { preprocessScript } from '../engine/preprocessor';
-
-/** 카탈론 스튜디오 스크립트 패턴 감지 (import, new TestObject, addProperty 등) */
-function hasKatalonPatterns(content: string): boolean {
-  return (
-    /\bnew\s+TestObject\s*\(/.test(content) ||
-    /\.addProperty\s*\(/.test(content) ||
-    /^import\s+/m.test(content)
-  );
-}
 
 export function registerFileHandlers() {
   ipcMain.handle(IPC_CHANNELS.FILE_CREATE, async (_event, args) => {
@@ -36,16 +26,17 @@ export function registerFileHandlers() {
   ipcMain.handle(IPC_CHANNELS.FILE_WRITE, async (_event, args) => {
     const { projectPath, relativePath, content } = args;
     try {
-      // .groovy 파일에 카탈론 패턴이 있으면 자동 변환
+      // .groovy 파일: import 줄만 제거 (나머지 코드는 그대로 보존)
       let finalContent = content;
-      let converted = false;
-      if (relativePath.endsWith('.groovy') && hasKatalonPatterns(content)) {
-        const result = preprocessScript(content);
-        finalContent = result.cleanScript;
-        converted = true;
+      if (relativePath.endsWith('.groovy') && /^import\s+/m.test(content)) {
+        finalContent = content
+          .split(/\r?\n/)
+          .filter((line: string) => !line.trimStart().startsWith('import '))
+          .join('\n')
+          .replace(/^\n+/, ''); // 맨 위 빈줄 제거
       }
       fileService.writeFile(projectPath, relativePath, finalContent);
-      return { success: true, converted, content: converted ? finalContent : undefined };
+      return { success: true, cleaned: finalContent !== content, content: finalContent };
     } catch (err: any) {
       return { success: false, error: err.message };
     }

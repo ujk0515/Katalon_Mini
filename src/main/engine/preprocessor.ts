@@ -10,6 +10,42 @@ export interface PreprocessResult {
   skippedLines: number;
   totalLines: number;
   lineMapping: Map<number, number>; // cleanScript line → original line
+  isGroovyMode: boolean;
+}
+
+/** Detect if script contains Groovy code beyond simple WebUI calls */
+export function hasGroovyCode(script: string): boolean {
+  const lines = script.split(/\r?\n/);
+  return lines.some(l => {
+    const t = l.trim();
+    // Skip comment lines and empty lines
+    if (t === '' || t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return false;
+    return (
+      /^(def |if\s*\(|for\s*\(|while\s*\(|try\s*\{|new |import )/.test(t) ||
+      /^\w+\.\w+\s*=\s*/.test(t) ||
+      /^\w+\s*=\s*/.test(t) ||
+      /\.addProperty\s*\(/.test(t) ||
+      /\.findAll\s*\{/.test(t) ||
+      /\.each\s*\{/.test(t) ||
+      /KeywordUtil\./.test(t) ||
+      /DriverFactory\./.test(t) ||
+      /WebUiCommonHelper\./.test(t)
+    );
+  });
+}
+
+/** Strip only import lines, keep everything else (for Groovy mode) */
+export function stripImports(rawScript: string): PreprocessResult {
+  const lines = rawScript.split(/\r?\n/);
+  const kept = lines.filter(l => !l.trim().startsWith('import '));
+  const cleanScript = kept.join('\n').replace(/^\n+/, '');
+  return {
+    cleanScript,
+    skippedLines: lines.length - kept.length,
+    totalLines: lines.length,
+    lineMapping: new Map(),
+    isGroovyMode: true,
+  };
 }
 
 /** Extract TestObject variable definitions and their selectors from script */
@@ -166,6 +202,7 @@ export function preprocessScript(rawScript: string): PreprocessResult {
     skippedLines,
     totalLines: lines.length,
     lineMapping,
+    isGroovyMode: false,
   };
 }
 

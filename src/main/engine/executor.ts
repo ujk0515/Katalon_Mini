@@ -123,6 +123,70 @@ export class ScriptExecutor {
     await this.cleanup();
   }
 
+  /** Set file resolver for callTestCase support in Groovy mode */
+  setFileResolver(resolver: FileResolver | null): void {
+    this.fileResolver = resolver;
+  }
+
+  /**
+   * Execute a single command without browser lifecycle management.
+   * Used by GroovyInterpreter to run individual WebUI commands
+   * while keeping the browser open across multiple calls.
+   */
+  async runSingleCommand(cmd: PlaywrightCommand, config: BrowserConfig): Promise<void> {
+    await this.launchBrowser(config);
+    await this.executeCommand(cmd, config, () => {}, []);
+  }
+
+  /** Explicitly close the browser. Called by interpreter when done. */
+  async closeBrowser(): Promise<void> {
+    await this.cleanup();
+  }
+
+  /** Get text content from a selector (for interpreter getText support) */
+  async getTextContent(selector: string, config: BrowserConfig): Promise<string> {
+    this.ensurePage();
+    const text = await this.ap().textContent(this.sel(selector), { timeout: config.timeout });
+    return text ?? '';
+  }
+
+  /** Find an element and return its Playwright ElementHandle */
+  async findElement(selector: string, timeout: number): Promise<any> {
+    this.ensurePage();
+    return this.ap().waitForSelector(this.sel(selector), { timeout });
+  }
+
+  /** Ensure browser is launched (for interpreter direct calls) */
+  async launchIfNeeded(config: BrowserConfig): Promise<void> {
+    await this.launchBrowser(config);
+  }
+
+  /** Get current page URL */
+  getPageUrl(): string {
+    this.ensurePage();
+    return this.ap().url();
+  }
+
+  /** Get current page title */
+  async getPageTitle(): Promise<string> {
+    this.ensurePage();
+    return await this.ap().title();
+  }
+
+  /** Find multiple elements matching a sub-selector under a parent selector */
+  async findElements(parentSelector: string, childTag: string, timeout: number): Promise<any[]> {
+    this.ensurePage();
+    const resolved = this.sel(parentSelector);
+    const parent = await this.ap().waitForSelector(resolved, { timeout });
+    if (!parent) return [];
+    return await parent.$$(`${childTag}`);
+  }
+
+  /** Auto-prefix xpath for selectors (exposed for interpreter) */
+  resolveSelector(selector: string): string {
+    return this.sel(selector);
+  }
+
   private async launchBrowser(config: BrowserConfig) {
     if (!this.browser) {
       this.browser = await chromium.launch({ headless: config.headless });

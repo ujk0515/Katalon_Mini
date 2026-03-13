@@ -1,0 +1,896 @@
+/**
+ * Groovy Interpreter: Evaluates Groovy AST by tree-walking.
+ * Variables, control flow, closures are handled here.
+ * WebUI.xxx() calls are delegated to the existing ScriptExecutor.
+ */
+import type {
+  GroovyScriptAST,
+  GroovyStatement,
+  GroovyExpression,
+} from '../../shared/types/ast';
+import type { BrowserConfig } from '../../shared/types/project';
+import type { StepResult, ExecutionResult } from '../../shared/types/execution';
+import type { StepCallback, FileResolver } from './executor';
+import { ScriptExecutor } from './executor';
+import { parseScript } from './parser';
+import { mapToPlaywrightCommands } from './commandMapper';
+import { preprocessScript } from './preprocessor';
+
+// ─── Scope (variable context) ───
+
+class Scope {
+  private vars: Map<string, any> = new Map();
+  constructor(private parent: Scope | null = null) {}
+
+  get(name: string): any {
+    if (this.vars.has(name)) return this.vars.get(name);
+    if (this.parent) return this.parent.get(name);
+    return undefined; // Groovy-like: undefined = null
+  }
+
+  set(name: string, value: any): void {
+    if (!this.vars.has(name) && this.parent?.has(name)) {
+      this.parent.set(name, value);
+      return;
+    }
+    this.vars.set(name, value);
+  }
+
+  declare(name: string, value: any): void {
+    this.vars.set(name, value);
+  }
+
+  has(name: string): boolean {
+    return this.vars.has(name) || (this.parent?.has(name) ?? false);
+  }
+
+  child(): Scope {
+    return new Scope(this);
+  }
+}
+
+// ─── Sentinel for control flow ───
+class ReturnSignal { constructor(public value: any) {} }
+class BreakSignal {}
+class ContinueSignal {}
+
+// ─── TestObject wrapper ───
+class TestObjectWrapper {
+  properties: Map<string, { type: string; value: string }> = new Map();
+
+  addProperty(propType: string, _conditionType: any, value: string): void {
+    this.properties.set(propType, { type: propType, value });
+  }
+
+  getSelector(): string {
+    const xpath = this.properties.get('xpath');
+    if (xpath) return xpath.value;
+    const css = this.properties.get('css');
+    if (css) return `css=${css.value}`;
+    const id = this.properties.get('id');
+    if (id) return `#${id.value}`;
+    const name = this.properties.get('name');
+    if (name) return `[name="${name.value}"]`;
+    // fallback: return first value
+    for (const [, prop] of this.properties) return prop.value;
+    return '';
+  }
+}
+
+// ─── Main Interpreter ───
+
+export class GroovyInterpreter {
+  private globalScope: Scope;
+  private executor: ScriptExecutor;
+  private config: BrowserConfig;
+  private onStep: StepCallback;
+  private fileResolver: FileResolver | null;
+  private steps: StepResult[] = [];
+  private stepIndex = 0;
+  private aborted = false;
+  private startedAt = '';
+
+  constructor(
+    executor: ScriptExecutor,
+    config: BrowserConfig,
+    onStep: StepCallback,
+    fileResolver?: FileResolver,
+  ) {
+    this.executor = executor;
+    this.config = config;
+    this.onStep = onStep;
+    this.fileResolver = fileResolver || null;
+    this.globalScope = new Scope();
+    // Set fileResolver on executor so callTestCase works in Groovy mode
+    this.executor.setFileResolver(this.fileResolver);
+    this.registerBuiltins();
+  }
+
+  async execute(ast: GroovyScriptAST): Promise<ExecutionResult> {
+    this.startedAt = new Date().toISOString();
+    this.steps = [];
+    this.stepIndex = 0;
+    let overallStatus: 'pass' | 'fail' | 'error' = 'pass';
+
+    try {
+      for (const stmt of ast.statements) {
+        if (this.aborted) { overallStatus = 'error'; break; }
+        const result = await this.execStatement(stmt, this.globalScope);
+        if (result instanceof ReturnSignal) break;
+      }
+    } catch (err: any) {
+      if (!this.aborted) {
+        overallStatus = 'fail';
+        const errMsg = err.message || String(err);
+        // Add error step
+        this.steps.push({
+          index: this.stepIndex,
+          command: 'Error',
+          args: [errMsg],
+          status: 'fail',
+          duration: 0,
+          error: errMsg,
+          lineNumber: 0,
+        });
+        // Report error to UI
+        this.onStep({
+          step: this.stepIndex,
+          total: 0,
+          command: `Error: ${errMsg}`,
+          status: 'fail',
+          lineNumber: 0,
+          error: errMsg,
+        });
+      } else {
+        overallStatus = 'error';
+      }
+    }
+
+    // Clean up browser when interpreter finishes
+    await this.executor.closeBrowser();
+
+    // Determine overall status from steps
+    if (overallStatus === 'pass' && this.steps.some(s => s.status === 'fail')) {
+      overallStatus = 'fail';
+    }
+
+    return {
+      testCaseId: '',
+      testCaseName: '',
+      status: overallStatus,
+      startedAt: this.startedAt,
+      completedAt: new Date().toISOString(),
+      duration: this.steps.reduce((sum, s) => sum + s.duration, 0),
+      steps: this.steps,
+    };
+  }
+
+  stop(): void {
+    this.aborted = true;
+    this.executor.stop();
+  }
+
+  // ─── Statement Execution ───
+
+  private async execStatement(stmt: GroovyStatement, scope: Scope): Promise<any> {
+    if (this.aborted) return;
+
+    switch (stmt.type) {
+      case 'VarDeclaration': {
+        const value = stmt.initializer ? await this.evaluate(stmt.initializer, scope) : null;
+        scope.declare(stmt.name, value);
+        return;
+      }
+
+      case 'Assignment': {
+        const value = await this.evaluate(stmt.value, scope);
+        await this.assignTarget(stmt.target, value, scope);
+        return;
+      }
+
+      case 'If': {
+        const cond = await this.evaluate(stmt.condition, scope);
+        if (this.isTruthy(cond)) {
+          return this.execBlock(stmt.thenBlock, scope);
+        }
+        for (const elif of stmt.elseIfBlocks) {
+          if (this.isTruthy(await this.evaluate(elif.condition, scope))) {
+            return this.execBlock(elif.block, scope);
+          }
+        }
+        if (stmt.elseBlock) {
+          return this.execBlock(stmt.elseBlock, scope);
+        }
+        return;
+      }
+
+      case 'For': {
+        if (stmt.variant === 'forIn' && stmt.iterable) {
+          const iterable = await this.evaluate(stmt.iterable, scope);
+          const arr = Array.isArray(iterable) ? iterable : [];
+          const childScope = scope.child();
+          for (const item of arr) {
+            if (this.aborted) break;
+            childScope.declare(stmt.variable, item);
+            const result = await this.execBlock(stmt.body, childScope);
+            if (result instanceof BreakSignal) break;
+            if (result instanceof ReturnSignal) return result;
+            if (result instanceof ContinueSignal) continue;
+          }
+        } else if (stmt.variant === 'classic') {
+          const childScope = scope.child();
+          if (stmt.init) await this.execStatement(stmt.init, childScope);
+          while (true) {
+            if (this.aborted) break;
+            if (stmt.condition) {
+              const cond = await this.evaluate(stmt.condition, childScope);
+              if (!this.isTruthy(cond)) break;
+            }
+            const result = await this.execBlock(stmt.body, childScope);
+            if (result instanceof BreakSignal) break;
+            if (result instanceof ReturnSignal) return result;
+            if (stmt.update) await this.evaluate(stmt.update, childScope);
+          }
+        }
+        return;
+      }
+
+      case 'While': {
+        const childScope = scope.child();
+        while (!this.aborted) {
+          const cond = await this.evaluate(stmt.condition, childScope);
+          if (!this.isTruthy(cond)) break;
+          const result = await this.execBlock(stmt.body, childScope);
+          if (result instanceof BreakSignal) break;
+          if (result instanceof ReturnSignal) return result;
+        }
+        return;
+      }
+
+      case 'TryCatch': {
+        try {
+          await this.execBlock(stmt.tryBlock, scope);
+        } catch (err: any) {
+          if (stmt.catchBlock) {
+            const childScope = scope.child();
+            if (stmt.catchVariable) {
+              childScope.declare(stmt.catchVariable, err);
+            }
+            await this.execBlock(stmt.catchBlock, childScope);
+          }
+        } finally {
+          if (stmt.finallyBlock) {
+            await this.execBlock(stmt.finallyBlock, scope);
+          }
+        }
+        return;
+      }
+
+      case 'ExpressionStatement':
+        return this.evaluate(stmt.expression, scope);
+
+      case 'Comment':
+        return;
+
+      case 'Return':
+        return new ReturnSignal(stmt.value ? await this.evaluate(stmt.value, scope) : null);
+    }
+  }
+
+  private async execBlock(stmts: GroovyStatement[], parentScope: Scope): Promise<any> {
+    const scope = parentScope.child();
+    for (const stmt of stmts) {
+      if (this.aborted) return;
+      const result = await this.execStatement(stmt, scope);
+      if (result instanceof ReturnSignal || result instanceof BreakSignal || result instanceof ContinueSignal) {
+        return result;
+      }
+    }
+  }
+
+  // ─── Expression Evaluation ───
+
+  private async evaluate(expr: GroovyExpression, scope: Scope): Promise<any> {
+    switch (expr.type) {
+      case 'Literal':
+        return expr.value;
+
+      case 'Identifier':
+        return scope.get(expr.name);
+
+      case 'Binary':
+        return this.evalBinary(expr, scope);
+
+      case 'Unary': {
+        const operand = await this.evaluate(expr.operand, scope);
+        if (expr.operator === '!') return !this.isTruthy(operand);
+        if (expr.operator === '-') return -operand;
+        return operand;
+      }
+
+      case 'Member':
+        return this.evalMember(expr, scope);
+
+      case 'Call':
+        return this.evalCall(expr, scope);
+
+      case 'Index': {
+        const obj = await this.evaluate(expr.object, scope);
+        const idx = await this.evaluate(expr.index, scope);
+        if (Array.isArray(obj)) return obj[idx];
+        if (obj && typeof obj === 'object') return obj[idx];
+        return undefined;
+      }
+
+      case 'New':
+        return this.evalNew(expr, scope);
+
+      case 'Closure':
+        return this.createClosure(expr, scope);
+
+      case 'List': {
+        const elements = [];
+        for (const el of expr.elements) {
+          elements.push(await this.evaluate(el, scope));
+        }
+        return elements;
+      }
+
+      case 'Map': {
+        const map: Record<string, any> = {};
+        for (const entry of expr.entries) {
+          const key = await this.evaluate(entry.key, scope);
+          map[String(key)] = await this.evaluate(entry.value, scope);
+        }
+        return map;
+      }
+
+      case 'StringInterpolation': {
+        let result = '';
+        for (const part of expr.parts) {
+          if (typeof part === 'string') {
+            result += part;
+          } else {
+            result += String(await this.evaluate(part, scope));
+          }
+        }
+        return result;
+      }
+
+      case 'Ternary': {
+        const cond = await this.evaluate(expr.condition, scope);
+        return this.isTruthy(cond)
+          ? this.evaluate(expr.consequent, scope)
+          : this.evaluate(expr.alternate, scope);
+      }
+
+      case 'Assign': {
+        const value = await this.evaluate(expr.value, scope);
+        await this.assignTarget(expr.target, value, scope);
+        return value;
+      }
+
+      case 'Cast':
+        // Type casts are mostly no-ops in our interpreter
+        return this.evaluate(expr.expression, scope);
+    }
+  }
+
+  private async evalBinary(expr: { operator: string; left: GroovyExpression; right: GroovyExpression }, scope: Scope): Promise<any> {
+    const left = await this.evaluate(expr.left, scope);
+    // Short-circuit for && and ||
+    if (expr.operator === '&&') return this.isTruthy(left) ? await this.evaluate(expr.right, scope) : left;
+    if (expr.operator === '||') return this.isTruthy(left) ? left : await this.evaluate(expr.right, scope);
+
+    const right = await this.evaluate(expr.right, scope);
+
+    switch (expr.operator) {
+      case '+':
+        if (typeof left === 'string' || typeof right === 'string') return String(left) + String(right);
+        return (left as number) + (right as number);
+      case '-': return (left as number) - (right as number);
+      case '*': return (left as number) * (right as number);
+      case '/': return (left as number) / (right as number);
+      case '%': return (left as number) % (right as number);
+      case '==': return left == right;
+      case '!=': return left != right;
+      case '<': return left < right;
+      case '>': return left > right;
+      case '<=': return left <= right;
+      case '>=': return left >= right;
+      default: return null;
+    }
+  }
+
+  private async evalMember(expr: { object: GroovyExpression; property: string }, scope: Scope): Promise<any> {
+    const obj = await this.evaluate(expr.object, scope);
+    return this.resolveMember(obj, expr.property);
+  }
+
+  /** Resolve a member/method on an already-evaluated object (no re-evaluation) */
+  private resolveMember(obj: any, prop: string): any {
+    if (obj == null) return undefined;
+
+    // TestObjectWrapper special handling
+    if (obj instanceof TestObjectWrapper) {
+      if (prop === 'addProperty') {
+        return (...args: any[]) => obj.addProperty(args[0], args[1], args[2]);
+      }
+    }
+
+    // String methods
+    if (typeof obj === 'string') {
+      switch (prop) {
+        case 'trim': return () => obj.trim();
+        case 'length': return obj.length;
+        case 'toInteger': return () => parseInt(obj, 10);
+        case 'toLong': return () => parseInt(obj, 10);
+        case 'toFloat': return () => parseFloat(obj);
+        case 'toDouble': return () => parseFloat(obj);
+        case 'isInteger': return () => !isNaN(parseInt(obj, 10)) && String(parseInt(obj, 10)) === obj.trim();
+        case 'isEmpty': return () => obj.length === 0;
+        case 'contains': return (s: string) => obj.includes(s);
+        case 'startsWith': return (s: string) => obj.startsWith(s);
+        case 'endsWith': return (s: string) => obj.endsWith(s);
+        case 'replace': return (a: string, b: string) => obj.replace(a, b);
+        case 'replaceAll': return (a: string, b: string) => obj.replace(new RegExp(a, 'g'), b);
+        case 'split': return (s: string) => obj.split(s);
+        case 'toLowerCase': return () => obj.toLowerCase();
+        case 'toUpperCase': return () => obj.toUpperCase();
+        case 'substring': return (start: number, end?: number) => obj.substring(start, end);
+      }
+    }
+
+    // Array/List methods
+    if (Array.isArray(obj)) {
+      switch (prop) {
+        case 'size': return () => obj.length;
+        case 'length': return obj.length;
+        case 'isEmpty': return () => obj.length === 0;
+        case 'get': return (i: number) => obj[i];
+        case 'add': return (item: any) => { obj.push(item); return obj; };
+        case 'findAll': return async (closure: Function) => {
+          const result = [];
+          for (const item of obj) {
+            if (this.isTruthy(await closure(item))) result.push(item);
+          }
+          return result;
+        };
+        case 'find': return async (closure: Function) => {
+          for (const item of obj) {
+            if (this.isTruthy(await closure(item))) return item;
+          }
+          return null;
+        };
+        case 'each': return async (closure: Function) => {
+          for (const item of obj) { await closure(item); }
+        };
+        case 'collect': return async (closure: Function) => {
+          const result = [];
+          for (const item of obj) { result.push(await closure(item)); }
+          return result;
+        };
+        case 'first': return () => obj[0];
+        case 'last': return () => obj[obj.length - 1];
+      }
+    }
+
+    // Object property access
+    if (typeof obj === 'object' && prop in obj) {
+      const val = (obj as any)[prop];
+      if (typeof val === 'function') return val.bind(obj);
+      return val;
+    }
+
+    return undefined;
+  }
+
+  private async evalCall(expr: { callee: GroovyExpression; arguments: GroovyExpression[] }, scope: Scope): Promise<any> {
+    const args = [];
+    for (const a of expr.arguments) {
+      args.push(await this.evaluate(a, scope));
+    }
+
+    // WebUI.method() calls → delegate to executor pipeline
+    if (expr.callee.type === 'Member' && expr.callee.object.type === 'Identifier' && expr.callee.object.name === 'WebUI') {
+      return this.executeWebUICall(expr.callee.property, args, scope);
+    }
+
+    // Evaluate callee
+    let callee: any;
+    if (expr.callee.type === 'Member') {
+      // obj.method(args) — evaluate object ONCE, then resolve method on it
+      const obj = await this.evaluate(expr.callee.object, scope);
+      const method = expr.callee.property;
+      const fn = this.resolveMember(obj, method);
+
+      if (typeof fn === 'function') {
+        return await fn(...args);
+      }
+
+      throw new Error(`Cannot call method '${method}' on ${typeof obj}`);
+    }
+
+    callee = await this.evaluate(expr.callee, scope);
+
+    if (typeof callee === 'function') {
+      return await callee(...args);
+    }
+
+    if (expr.callee.type === 'Identifier') {
+      throw new Error(`Undefined function: ${expr.callee.name}`);
+    }
+
+    throw new Error(`Not a function`);
+  }
+
+  private async evalNew(expr: { className: string; arguments: GroovyExpression[] }, scope: Scope): Promise<any> {
+    const args = [];
+    for (const a of expr.arguments) {
+      args.push(await this.evaluate(a, scope));
+    }
+
+    switch (expr.className) {
+      case 'TestObject':
+        return new TestObjectWrapper();
+
+      case 'Random':
+        return {
+          nextInt: (bound?: number) => bound ? Math.floor(Math.random() * bound) : Math.floor(Math.random() * 2147483647),
+        };
+
+      case 'Date':
+        return new Date(...(args as []));
+
+      case 'ArrayList':
+      case 'LinkedList':
+        return [];
+
+      case 'HashMap':
+      case 'LinkedHashMap':
+        return {};
+
+      default: {
+        // Try to construct from scope (user-defined or registered class)
+        const klass = scope.get(expr.className);
+        if (typeof klass === 'function') {
+          return new klass(...args);
+        }
+        // Return a generic object
+        return { _className: expr.className };
+      }
+    }
+  }
+
+  private createClosure(expr: { parameters: string[]; body: GroovyStatement[] }, parentScope: Scope): Function {
+    const interpreter = this;
+    const params = expr.parameters;
+    const body = expr.body;
+
+    return async function (...args: any[]) {
+      const closureScope = parentScope.child();
+      // If no named params, use 'it' as default
+      if (params.length === 0 && args.length > 0) {
+        closureScope.declare('it', args[0]);
+      } else {
+        params.forEach((p, i) => closureScope.declare(p, args[i]));
+      }
+
+      let lastValue: any = null;
+      for (const stmt of body) {
+        const result = await interpreter.execStatement(stmt, closureScope);
+        if (result instanceof ReturnSignal) return result.value;
+        // In Groovy, the last expression is the implicit return
+        // execStatement already evaluates ExpressionStatement and returns the value
+        if (stmt.type === 'ExpressionStatement') {
+          lastValue = result;
+        }
+      }
+      return lastValue;
+    };
+  }
+
+  // ─── WebUI Bridge ───
+
+  private async executeWebUICall(method: string, args: any[], scope: Scope): Promise<any> {
+    // Resolve TestObjectWrapper → selector string
+    const resolvedArgs = args.map(a => {
+      if (a instanceof TestObjectWrapper) return a.getSelector();
+      return a;
+    });
+
+    this.stepIndex++;
+    const stepStart = Date.now();
+    let stepStatus: 'pass' | 'fail' = 'pass';
+    let stepError: string | undefined;
+    let returnValue: any = undefined;
+
+    const shortLabel = `WebUI.${method}(${resolvedArgs.map(a => typeof a === 'string' && a.length > 40 ? a.substring(0, 40) + '...' : String(a ?? '')).join(', ')})`;
+
+    this.onStep({
+      step: this.stepIndex,
+      total: 0,
+      command: shortLabel,
+      status: 'running',
+      lineNumber: 0,
+    });
+
+    try {
+      // --- Value-returning methods: bypass pipeline, call executor directly ---
+      if (method === 'getText' && resolvedArgs.length >= 1) {
+        returnValue = await this.executor.getTextContent(String(resolvedArgs[0]), this.config);
+      } else if (method === 'getAttribute' && resolvedArgs.length >= 2) {
+        // getAttribute(selector, attributeName)
+        await this.executor.launchIfNeeded(this.config);
+        const el = await this.executor.findElement(String(resolvedArgs[0]), this.config.timeout);
+        returnValue = el ? await el.getAttribute(String(resolvedArgs[1])) : null;
+      } else if (method === 'getUrl') {
+        await this.executor.launchIfNeeded(this.config);
+        returnValue = this.executor.getPageUrl();
+      } else if (method === 'getWindowTitle') {
+        await this.executor.launchIfNeeded(this.config);
+        returnValue = await this.executor.getPageTitle();
+      } else if (method === 'getNumberOfTotalOption' && resolvedArgs.length >= 1) {
+        await this.executor.launchIfNeeded(this.config);
+        const options = await this.executor.findElements(String(resolvedArgs[0]), 'option', this.config.timeout);
+        returnValue = options ? options.length : 0;
+      } else if (method === 'verifyMatch' && resolvedArgs.length >= 3) {
+        // verifyMatch(actual, expected, isRegex) — returns boolean, doesn't throw
+        const actual = String(resolvedArgs[0] ?? '');
+        const expected = String(resolvedArgs[1] ?? '');
+        const isRegex = resolvedArgs[2] === true || resolvedArgs[2] === 'true';
+        if (isRegex) {
+          returnValue = new RegExp(expected).test(actual);
+        } else {
+          returnValue = actual === expected;
+        }
+        if (!returnValue) {
+          console.warn(`verifyMatch failed: "${actual}" does not match "${expected}"`);
+        }
+      } else {
+        // --- All other methods: go through pipeline ---
+        const argsStr = resolvedArgs.map(a => {
+          if (typeof a === 'string') return `"${a.replace(/"/g, '\\"')}"`;
+          if (typeof a === 'number') return String(a);
+          if (a === null || a === undefined) return '""';
+          return `"${String(a)}"`;
+        }).join(', ');
+
+        let scriptLine: string;
+        if (method === 'callTestCase' && resolvedArgs.length >= 1) {
+          scriptLine = `WebUI.callTestCase(findTestCase("${resolvedArgs[0]}"))`;
+        } else if (['click', 'doubleClick', 'setText', 'clearText', 'sendKeys',
+          'waitForElementPresent', 'waitForElementVisible', 'verifyElementPresent',
+          'verifyElementText', 'scrollToElement', 'selectOptionByLabel',
+          'switchToFrame', 'selectDate', 'selectRandomDate', 'selectRandomDateAfter',
+        ].includes(method) && resolvedArgs.length >= 1) {
+          const selector = resolvedArgs[0];
+          const restArgs = resolvedArgs.slice(1).map(a =>
+            typeof a === 'string' ? `"${a.replace(/"/g, '\\"')}"` : String(a ?? '')
+          );
+          const allArgs = [`findTestObject("${selector}")`, ...restArgs].join(', ');
+          scriptLine = `WebUI.${method}(${allArgs})`;
+        } else {
+          scriptLine = `WebUI.${method}(${argsStr})`;
+        }
+
+        const { cleanScript } = preprocessScript(scriptLine);
+        const ast = parseScript(cleanScript);
+        const commands = mapToPlaywrightCommands(ast);
+
+        for (const cmd of commands) {
+          if (cmd.action === 'comment') continue;
+          if (cmd.action === 'close') continue;
+          await this.executor.runSingleCommand(cmd, this.config);
+        }
+      }
+    } catch (err: any) {
+      stepStatus = 'fail';
+      stepError = err.message || String(err);
+    }
+
+    const duration = Date.now() - stepStart;
+    const commandLabel = `WebUI.${method}(${resolvedArgs.map(a => typeof a === 'string' && a.length > 50 ? a.substring(0, 50) + '...' : String(a ?? '')).join(', ')})`;
+
+    this.steps.push({
+      index: this.stepIndex - 1,
+      command: commandLabel,
+      args: resolvedArgs.map(a => String(a ?? '')),
+      status: stepStatus,
+      duration,
+      error: stepError,
+      lineNumber: 0,
+    });
+
+    this.onStep({
+      step: this.stepIndex,
+      total: 0,
+      command: commandLabel,
+      status: stepStatus,
+      lineNumber: 0,
+      duration,
+      error: stepError,
+    });
+
+    if (stepStatus === 'fail') {
+      throw new Error(stepError || `WebUI.${method} failed`);
+    }
+
+    return returnValue;
+  }
+
+  // ─── Assignment Helper ───
+
+  private async assignTarget(target: GroovyExpression, value: any, scope: Scope): Promise<void> {
+    if (target.type === 'Identifier') {
+      scope.set(target.name, value);
+    } else if (target.type === 'Member') {
+      const obj = await this.evaluate(target.object, scope);
+      if (obj && typeof obj === 'object') {
+        (obj as any)[target.property] = value;
+      }
+    } else if (target.type === 'Index') {
+      const obj = await this.evaluate(target.object, scope);
+      const idx = await this.evaluate(target.index, scope);
+      if (Array.isArray(obj)) obj[idx] = value;
+      else if (obj && typeof obj === 'object') (obj as any)[idx] = value;
+    }
+  }
+
+  // ─── Builtins ───
+
+  private registerBuiltins(): void {
+    // println
+    this.globalScope.declare('println', (msg: any) => {
+      this.onStep({
+        step: this.stepIndex,
+        total: 0,
+        command: `println: ${String(msg)}`,
+        status: 'pass',
+        lineNumber: 0,
+      });
+    });
+
+    // findTestObject → returns the path string
+    this.globalScope.declare('findTestObject', (path: string) => path);
+
+    // findTestCase → returns the path string
+    this.globalScope.declare('findTestCase', (path: string) => path);
+
+    // FailureHandling enum
+    this.globalScope.declare('FailureHandling', {
+      STOP_ON_FAILURE: 'STOP_ON_FAILURE',
+      CONTINUE_ON_FAILURE: 'CONTINUE_ON_FAILURE',
+      OPTIONAL: 'OPTIONAL',
+    });
+
+    // ConditionType enum
+    this.globalScope.declare('ConditionType', {
+      EQUALS: 'EQUALS',
+      CONTAINS: 'CONTAINS',
+      STARTS_WITH: 'STARTS_WITH',
+      ENDS_WITH: 'ENDS_WITH',
+      MATCHES_REGEX: 'MATCHES_REGEX',
+    });
+
+    // KeywordUtil
+    this.globalScope.declare('KeywordUtil', {
+      markFailed: (msg: string) => {
+        throw new Error(`FAILED: ${msg}`);
+      },
+      markFailedAndStop: (msg: string) => {
+        throw new Error(`FAILED_AND_STOP: ${msg}`);
+      },
+      logInfo: (msg: string) => {
+        this.onStep({ step: this.stepIndex, total: 0, command: `[INFO] ${msg}`, status: 'pass', lineNumber: 0 });
+      },
+    });
+
+    // Integer, String class methods
+    this.globalScope.declare('Integer', {
+      parseInt: (s: string) => parseInt(s, 10),
+      valueOf: (s: string) => parseInt(s, 10),
+    });
+
+    // By (Selenium selector)
+    this.globalScope.declare('By', {
+      xpath: (expr: string) => `xpath=${expr}`,
+      cssSelector: (expr: string) => `css=${expr}`,
+      id: (id: string) => `#${id}`,
+      name: (name: string) => `[name="${name}"]`,
+      className: (cls: string) => `.${cls}`,
+      tagName: (tag: string) => tag,
+    });
+
+    // WebUiCommonHelper
+    this.globalScope.declare('WebUiCommonHelper', {
+      findWebElement: async (testObj: any, timeout: number) => {
+        const selector = testObj instanceof TestObjectWrapper ? testObj.getSelector() : String(testObj);
+        // Find the real element via Playwright
+        const handle = await this.executor.findElement(selector, (timeout || 10) * 1000);
+        if (!handle) throw new Error(`Element not found: ${selector}`);
+        return this.createElementHandleProxy(handle);
+      },
+    });
+
+    // DriverFactory
+    this.globalScope.declare('DriverFactory', {
+      getWebDriver: () => {
+        return this.createDriverProxy();
+      },
+    });
+
+    // LogType enum
+    this.globalScope.declare('LogType', {
+      BROWSER: 'browser',
+      DRIVER: 'driver',
+      PERFORMANCE: 'performance',
+    });
+
+    // Random is handled by new Random() in evalNew
+    // But also register as a class reference
+    this.globalScope.declare('Random', function() {
+      return {
+        nextInt: (bound?: number) => bound ? Math.floor(Math.random() * bound) : Math.floor(Math.random() * 2147483647),
+      };
+    });
+  }
+
+  /**
+   * Wrap a real Playwright ElementHandle so Groovy scripts can call
+   * getText(), click(), isDisplayed(), isEnabled(), findElements(), etc.
+   */
+  private createElementHandleProxy(handle: any): any {
+    const self = this;
+    return {
+      _handle: handle,
+      getText: async () => {
+        const text = await handle.textContent();
+        return text ?? '';
+      },
+      click: async () => {
+        await handle.click();
+      },
+      isDisplayed: async () => {
+        try { return await handle.isVisible(); } catch { return false; }
+      },
+      isEnabled: async () => {
+        try { return await handle.isEnabled(); } catch { return false; }
+      },
+      findElements: async (bySelector: string) => {
+        const resolvedSel = self.executor.resolveSelector(bySelector);
+        const elements = await handle.$$(resolvedSel);
+        return elements.map((el: any) => self.createElementHandleProxy(el));
+      },
+      findElement: async (bySelector: string) => {
+        const resolvedSel = self.executor.resolveSelector(bySelector);
+        const el = await handle.$(resolvedSel);
+        return el ? self.createElementHandleProxy(el) : null;
+      },
+    };
+  }
+
+  private createDriverProxy(): any {
+    return {
+      manage: () => ({
+        logs: () => ({
+          get: (logType: string) => {
+            // Return empty log entries - browser console logs
+            return [];
+          },
+        }),
+      }),
+    };
+  }
+
+  // ─── Utility ───
+
+  private isTruthy(value: any): boolean {
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') return value.length > 0;
+    if (Array.isArray(value)) return value.length > 0;
+    return true;
+  }
+}

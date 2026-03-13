@@ -12,6 +12,7 @@
     "build:renderer": "vite build",
     "start": "electron dist/main/index.js",
     "postinstall": "npx playwright install chromium",
+    "clean": "node -e \"const fs=require('fs');['dist','release'].forEach(d=>{if(fs.existsSync(d))fs.rmSync(d,{recursive:true,force:true})})\"",
     "package": "electron-builder"
   },
   "dependencies": {

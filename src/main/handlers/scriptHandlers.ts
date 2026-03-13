@@ -5,10 +5,13 @@ import { parseScript } from '../engine/parser';
 import { mapToPlaywrightCommands } from '../engine/commandMapper';
 import { ScriptExecutor } from '../engine/executor';
 import { readFile } from '../services/fileService';
-import { preprocessScript } from '../engine/preprocessor';
+import { preprocessScript, hasGroovyCode, stripImports } from '../engine/preprocessor';
+import { parseGroovyScript } from '../engine/groovyParser';
+import { GroovyInterpreter } from '../engine/interpreter';
 import type { FileResolver } from '../engine/executor';
 
 let currentExecutor: ScriptExecutor | null = null;
+let currentInterpreter: GroovyInterpreter | null = null;
 
 export function registerScriptHandlers() {
   ipcMain.handle(IPC_CHANNELS.SCRIPT_EXECUTE, async (event, args) => {
@@ -29,47 +32,81 @@ export function registerScriptHandlers() {
     };
 
     try {
-      // Preprocess: strip non-WebUI lines (import, def, new, etc.)
-      const { cleanScript, skippedLines, totalLines } = preprocessScript(script);
+      // Detect Groovy mode
+      if (hasGroovyCode(script)) {
+        // ─── Groovy Pipeline ───
+        const { cleanScript, skippedLines, totalLines } = stripImports(script);
 
-      if (skippedLines > 0) {
-        win?.webContents.send(IPC_CHANNELS.SCRIPT_LOG, {
-          timestamp: new Date().toISOString(),
-          step: 0,
-          total: 0,
-          command: `[Preprocessor] ${skippedLines}/${totalLines} lines skipped`,
-          status: 'pass',
-          lineNumber: 0,
-        });
+        if (skippedLines > 0) {
+          win?.webContents.send(IPC_CHANNELS.SCRIPT_LOG, {
+            timestamp: new Date().toISOString(),
+            step: 0,
+            total: 0,
+            command: `[Groovy Mode] ${skippedLines} import lines stripped`,
+            status: 'pass',
+            lineNumber: 0,
+          });
+        }
+
+        const groovyAst = parseGroovyScript(cleanScript);
+
+        currentExecutor = new ScriptExecutor();
+        currentInterpreter = new GroovyInterpreter(
+          currentExecutor,
+          config,
+          (log) => { win?.webContents.send(IPC_CHANNELS.SCRIPT_LOG, log); },
+          fileResolver,
+        );
+
+        const result = await currentInterpreter.execute(groovyAst);
+        result.testCaseId = testCaseId;
+        result.testCaseName = testCaseId;
+        win?.webContents.send(IPC_CHANNELS.SCRIPT_COMPLETE, { result });
+        currentExecutor = null;
+        currentInterpreter = null;
+
+      } else {
+        // ─── Legacy WebUI-only Pipeline ───
+        const { cleanScript, skippedLines, totalLines } = preprocessScript(script);
+
+        if (skippedLines > 0) {
+          win?.webContents.send(IPC_CHANNELS.SCRIPT_LOG, {
+            timestamp: new Date().toISOString(),
+            step: 0,
+            total: 0,
+            command: `[Preprocessor] ${skippedLines}/${totalLines} lines skipped`,
+            status: 'pass',
+            lineNumber: 0,
+          });
+        }
+
+        const ast = parseScript(cleanScript);
+        const commands = mapToPlaywrightCommands(ast);
+
+        if (commands.length === 0) {
+          win?.webContents.send(IPC_CHANNELS.SCRIPT_ERROR, {
+            message: 'No executable commands found in script',
+            lineNumber: 0,
+            column: 0,
+            type: 'parse',
+          });
+          return;
+        }
+
+        currentExecutor = new ScriptExecutor();
+
+        const result = await currentExecutor.execute(commands, config, (log) => {
+          win?.webContents.send(IPC_CHANNELS.SCRIPT_LOG, log);
+        }, fileResolver);
+
+        result.testCaseId = testCaseId;
+        result.testCaseName = testCaseId;
+        win?.webContents.send(IPC_CHANNELS.SCRIPT_COMPLETE, { result });
+        currentExecutor = null;
       }
-
-      // Parse
-      const ast = parseScript(cleanScript);
-      const commands = mapToPlaywrightCommands(ast);
-
-      if (commands.length === 0) {
-        win?.webContents.send(IPC_CHANNELS.SCRIPT_ERROR, {
-          message: 'No executable commands found in script',
-          lineNumber: 0,
-          column: 0,
-          type: 'parse',
-        });
-        return;
-      }
-
-      // Execute with fileResolver
-      currentExecutor = new ScriptExecutor();
-
-      const result = await currentExecutor.execute(commands, config, (log) => {
-        win?.webContents.send(IPC_CHANNELS.SCRIPT_LOG, log);
-      }, fileResolver);
-
-      result.testCaseId = testCaseId;
-      result.testCaseName = testCaseId;
-      win?.webContents.send(IPC_CHANNELS.SCRIPT_COMPLETE, { result });
-      currentExecutor = null;
     } catch (err: any) {
       currentExecutor = null;
+      currentInterpreter = null;
 
       // Parse errors
       const lineMatch = err.message?.match(/Line (\d+)/);
@@ -85,6 +122,10 @@ export function registerScriptHandlers() {
   });
 
   ipcMain.handle(IPC_CHANNELS.SCRIPT_STOP, async () => {
+    if (currentInterpreter) {
+      currentInterpreter.stop();
+      currentInterpreter = null;
+    }
     if (currentExecutor) {
       await currentExecutor.stop();
       currentExecutor = null;

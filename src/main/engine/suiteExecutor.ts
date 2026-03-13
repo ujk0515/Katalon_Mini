@@ -2,11 +2,13 @@ import * as os from 'os';
 import type { BrowserConfig } from '../../shared/types/project';
 import type { TestSuiteConfig, SuiteResult, TestCaseResult, SuiteStatistics, SuiteContext } from '../../shared/types/suite';
 import { ScriptExecutor } from './executor';
-import { preprocessScript } from './preprocessor';
+import { preprocessScript, hasGroovyCode, stripImports } from './preprocessor';
 import { parseScript } from './parser';
 import { mapToPlaywrightCommands } from './commandMapper';
 import { readFile } from '../services/fileService';
 import { generateReport } from './reportGenerator';
+import { parseGroovyScript } from './groovyParser';
+import { GroovyInterpreter } from './interpreter';
 
 export type SuiteStepCallback = (event: string, data: any) => void;
 
@@ -101,18 +103,33 @@ export class SuiteExecutor {
 
     try {
       const script = readFile(projectPath, tcPath);
-      const { cleanScript } = preprocessScript(script);
-      const ast = parseScript(cleanScript);
-      const commands = mapToPlaywrightCommands(ast);
 
       const fileResolver = async (testCasePath: string) => {
         const relPath = testCasePath.endsWith('.groovy') ? testCasePath : `${testCasePath}.groovy`;
         return readFile(projectPath, relPath);
       };
 
-      const result = await executor.execute(commands, config, (log) => {
-        onEvent('stepLog', { tcName, ...log });
-      }, fileResolver);
+      let result;
+
+      if (hasGroovyCode(script)) {
+        // Groovy Pipeline
+        const { cleanScript } = stripImports(script);
+        const groovyAst = parseGroovyScript(cleanScript);
+        const interpreter = new GroovyInterpreter(
+          executor, config,
+          (log) => { onEvent('stepLog', { tcName, ...log }); },
+          fileResolver,
+        );
+        result = await interpreter.execute(groovyAst);
+      } else {
+        // Legacy WebUI Pipeline
+        const { cleanScript } = preprocessScript(script);
+        const ast = parseScript(cleanScript);
+        const commands = mapToPlaywrightCommands(ast);
+        result = await executor.execute(commands, config, (log) => {
+          onEvent('stepLog', { tcName, ...log });
+        }, fileResolver);
+      }
 
       const completedAt = new Date().toISOString();
       return {
