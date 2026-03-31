@@ -44,6 +44,8 @@ export const Toolbar: React.FC = () => {
     } else {
       const script = getActiveContent();
       if (!script.trim()) return;
+      clearLogs();
+      resetSuite();
       await execute(script, activeTabId || 'unknown', projectPath || '');
     }
   };

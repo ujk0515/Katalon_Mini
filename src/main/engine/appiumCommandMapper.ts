@@ -22,12 +22,18 @@ const MOBILE_METHOD_MAP: Record<string, MobileMethodHandler> = {
   }),
 
   // ─── Element Interaction ───
-  tap: (args) => ({
-    action: 'tap',
-    selector: resolveSelector(args[0]),
-    timeout: (args[1] ?? 0) * 1000,
-    lineNumber: 0,
-  }),
+  tap: (args) => {
+    // 좌표 탭: Mobile.tap(x, y) — 둘 다 숫자
+    if (typeof args[0] === 'number' && typeof args[1] === 'number') {
+      return { action: 'tapCoord', lineNumber: 0, extra: { x: args[0], y: args[1] } };
+    }
+    return {
+      action: 'tap',
+      selector: resolveSelector(args[0]),
+      timeout: (args[1] ?? 0) * 1000,
+      lineNumber: 0,
+    };
+  },
   setText: (args) => ({
     action: 'setText',
     selector: resolveSelector(args[0]),
@@ -76,6 +82,12 @@ const MOBILE_METHOD_MAP: Record<string, MobileMethodHandler> = {
     timeout: (args[1] ?? 30) * 1000,
     lineNumber: 0,
   }),
+  waitForElementNotPresent: (args) => ({
+    action: 'verifyNotExist',
+    selector: resolveSelector(args[0]),
+    timeout: (args[1] ?? 30) * 1000,
+    lineNumber: 0,
+  }),
   getText: (args) => ({
     action: 'getText',
     selector: resolveSelector(args[0]),
@@ -110,6 +122,7 @@ const MOBILE_METHOD_MAP: Record<string, MobileMethodHandler> = {
     action: 'getAttribute',
     selector: resolveSelector(args[0]),
     value: args[1],
+    timeout: (args[2] ?? 10) * 1000,
     lineNumber: 0,
   }),
   getDeviceHeight: () => ({

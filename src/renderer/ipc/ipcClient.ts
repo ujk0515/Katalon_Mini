@@ -28,7 +28,7 @@ declare global {
       onScriptError: (callback: (data: any) => void) => () => void;
 
       // Suite
-      executeSuite: (args: { suitePath: string; projectPath: string; browserConfig?: any }) => Promise<void>;
+      executeSuite: (args: { suitePath: string; projectPath: string; browserConfig?: any; mobileConfig?: any; projectType?: string }) => Promise<void>;
       stopSuite: () => Promise<any>;
       onSuiteTcStart: (callback: (data: any) => void) => () => void;
       onSuiteTcComplete: (callback: (data: any) => void) => () => void;

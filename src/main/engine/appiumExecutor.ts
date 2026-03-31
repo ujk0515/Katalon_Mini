@@ -27,6 +27,7 @@ export class AppiumExecutor {
     // 시작 전 기존 세션 정리
     await this.appiumService.cleanupAllSessions();
     this.currentContext = 'NATIVE_APP';
+    this.userExplicitContext = false;
 
     const isIos = this.config.platform === 'ios';
 
@@ -159,6 +160,9 @@ export class AppiumExecutor {
       case 'tap':
         return this.handleTap(cmd);
 
+      case 'tapCoord':
+        return this.appiumService.tap(cmd.extra!.x, cmd.extra!.y);
+
       case 'setText':
         return this.handleSetText(cmd);
 
@@ -223,6 +227,15 @@ export class AppiumExecutor {
 
       case 'setContext': {
         let targetContext = cmd.value!;
+
+        // NATIVE_APP 전환은 바로 실행
+        if (targetContext === 'NATIVE_APP') {
+          await this.appiumService.setContext('NATIVE_APP');
+          this.currentContext = 'NATIVE_APP';
+          this.userExplicitContext = false;
+          return;
+        }
+
         const isAutoDetect = targetContext === 'WEBVIEW' || targetContext === 'WEBVIEW_';
 
         // 최대 30초 대기: 컨텍스트 찾기 + 전환까지 성공할 때까지 재시도
@@ -241,6 +254,7 @@ export class AppiumExecutor {
             }
             await this.appiumService.setContext(targetContext);
             this.currentContext = targetContext;
+            this.userExplicitContext = true;
             return;
           } catch (err: any) {
             if (this.aborted) throw new Error('Execution aborted');
@@ -369,11 +383,16 @@ export class AppiumExecutor {
   // ─── Auto WebView Context Switching ───
 
   private currentContext: string = 'NATIVE_APP';
+  private userExplicitContext: boolean = false; // 사용자가 명시적으로 컨텍스트 설정했는지
 
   private async autoSwitchContextIfNeeded(selector: string): Promise<void> {
+    // 사용자가 switchToContext로 명시적 설정했으면 자동 전환 안 함
+    if (this.userExplicitContext) return;
+
     // HTML XPath (/html/body/...) 또는 CSS 웹 셀렉터면 WebView로 전환
     const isWebSelector = selector.includes('/html') || selector.includes('/body')
       || selector.includes('div[') || selector.includes('button[')
+      || selector.includes('span[') || selector.includes('span>')
       || selector.includes('.today-badge') || selector.includes('#');
 
     if (isWebSelector && this.currentContext === 'NATIVE_APP') {

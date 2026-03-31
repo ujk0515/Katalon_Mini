@@ -9,7 +9,7 @@ let currentSuiteExecutor: SuiteExecutor | null = null;
 
 export function registerSuiteHandlers() {
   ipcMain.handle(IPC_CHANNELS.SUITE_EXECUTE, async (event, args) => {
-    const { suitePath, projectPath, browserConfig } = args;
+    const { suitePath, projectPath, browserConfig, mobileConfig, projectType } = args;
     const win = BrowserWindow.fromWebContents(event.sender);
     const config = { ...DEFAULT_BROWSER_CONFIG, ...browserConfig };
 
@@ -34,7 +34,7 @@ export function registerSuiteHandlers() {
             win?.webContents.send(IPC_CHANNELS.SUITE_COMPLETE, data);
             break;
         }
-      });
+      }, mobileConfig, projectType);
 
       currentSuiteExecutor = null;
     } catch (err: any) {

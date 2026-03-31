@@ -3,6 +3,8 @@ import type { SuiteResult, SuiteTcStartEvent, SuiteTcCompleteEvent } from '@shar
 import type { BrowserConfig } from '@shared/types/project';
 import type { LogEntry } from '@shared/types/execution';
 import { api } from '../ipc/ipcClient';
+import { useProjectStore } from './projectStore';
+import { useDeviceStore } from './deviceStore';
 
 interface TcProgress {
   index: number;
@@ -34,7 +36,16 @@ export const useSuiteStore = create<SuiteStore>((set, get) => ({
 
   executeSuite: async (suitePath, projectPath, viewport) => {
     set({ isRunning: true, suiteResult: null, reportPath: null, tcProgress: [] });
-    await api().executeSuite({ suitePath, projectPath, browserConfig: { viewport } });
+    const projectConfig = useProjectStore.getState().config;
+    const deviceState = useDeviceStore.getState();
+    const selectedDevice = deviceState.devices.find(d => d.udid === deviceState.selectedUdid);
+    const mobileConfig = projectConfig?.type === 'mobile' ? {
+      ...projectConfig.mobileConfig,
+      deviceUdid: deviceState.selectedUdid || '',
+      deviceName: selectedDevice?.name || '',
+      platform: selectedDevice?.platform || 'android',
+    } : undefined;
+    await api().executeSuite({ suitePath, projectPath, browserConfig: { viewport }, mobileConfig, projectType: projectConfig?.type });
   },
 
   stopSuite: () => {

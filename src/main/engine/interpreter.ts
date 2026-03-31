@@ -788,10 +788,14 @@ export class GroovyInterpreter {
       if (method === 'getText' && resolvedArgs.length >= 1) {
         returnValue = await this.executor.getTextContent(String(resolvedArgs[0]), this.config);
       } else if (method === 'getAttribute' && resolvedArgs.length >= 2) {
-        // getAttribute(selector, attributeName)
-        await this.executor.launchIfNeeded(this.config);
-        const el = await this.executor.findElement(String(resolvedArgs[0]), this.config.timeout);
-        returnValue = el ? await el.getAttribute(String(resolvedArgs[1])) : null;
+        // getAttribute(selector, attributeName) — 모바일 WebView면 Appium 사용
+        if (this.appiumExecutor) {
+          returnValue = await this.appiumExecutor.runMobileCommand('getAttribute', [resolvedArgs[0], resolvedArgs[1]], 0, this.onStep);
+        } else {
+          await this.executor.launchIfNeeded(this.config);
+          const el = await this.executor.findElement(String(resolvedArgs[0]), this.config.timeout);
+          returnValue = el ? await el.getAttribute(String(resolvedArgs[1])) : null;
+        }
       } else if (method === 'getUrl') {
         await this.executor.launchIfNeeded(this.config);
         returnValue = this.executor.getPageUrl();
@@ -908,13 +912,23 @@ export class GroovyInterpreter {
   // ─── Builtins ───
 
   private registerBuiltins(): void {
-    // println
+    // println — 별도 step으로 표시
     this.globalScope.declare('println', (msg: any) => {
+      this.stepIndex++;
+      const label = `println: ${String(msg)}`;
       this.onStep({
         step: this.stepIndex,
         total: 0,
-        command: `println: ${String(msg)}`,
+        command: label,
         status: 'pass',
+        lineNumber: 0,
+      });
+      this.steps.push({
+        index: this.stepIndex,
+        command: label,
+        args: [],
+        status: 'pass',
+        duration: 0,
         lineNumber: 0,
       });
     });
@@ -985,6 +999,10 @@ export class GroovyInterpreter {
     this.globalScope.declare('DriverFactory', {
       getWebDriver: () => {
         return this.createDriverProxy();
+      },
+      changeWebDriver: (_driver: any) => {
+        // 우리 앱에서는 드라이버 교체 불필요 (Appium이 직접 처리)
+        // 호환성을 위해 에러 없이 무시
       },
     });
 
@@ -1083,6 +1101,7 @@ export class GroovyInterpreter {
     // MobileDriverFactory → driver proxy 반환
     this.globalScope.declare('MobileDriverFactory', {
       getDriver: () => this.createDriverProxy(),
+      getWebDriver: () => this.createDriverProxy(),
     });
 
     // AppiumDriver는 driver proxy와 동일
