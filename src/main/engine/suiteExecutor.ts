@@ -1,0 +1,221 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import type { BrowserConfig } from '../../shared/types/project';
+import type { MobileConfig } from '../../shared/types/mobile';
+import type { TestSuiteConfig, SuiteResult, TestCaseResult, SuiteStatistics, SuiteContext } from '../../shared/types/suite';
+import { ScriptExecutor } from './executor';
+import { preprocessScript, hasGroovyCode, stripImports } from './preprocessor';
+import { parseScript } from './parser';
+import { mapToPlaywrightCommands } from './commandMapper';
+import { readFile } from '../services/fileService';
+import { generateReport } from './reportGenerator';
+import { parseGroovyScript } from './groovyParser';
+import { GroovyInterpreter } from './interpreter';
+import { AppiumExecutor } from './appiumExecutor';
+import { AppiumService } from '../services/appiumService';
+
+export type SuiteStepCallback = (event: string, data: any) => void;
+
+export class SuiteExecutor {
+  private aborted = false;
+  private currentExecutor: ScriptExecutor | null = null;
+  private sharedAppiumService: AppiumService | null = null;
+  private sharedAppiumExecutor: AppiumExecutor | null = null;
+
+  async execute(
+    suite: TestSuiteConfig,
+    projectPath: string,
+    config: BrowserConfig,
+    onEvent: SuiteStepCallback,
+    mobileConfig?: MobileConfig,
+    projectType?: 'web' | 'mobile',
+  ): Promise<SuiteResult> {
+    const startedAt = new Date().toISOString();
+    const results: TestCaseResult[] = [];
+    let hasFailure = false;
+
+    // 스위트 전체에서 하나의 AppiumService/Executor 공유
+    if (projectType === 'mobile' && mobileConfig) {
+      this.sharedAppiumService = new AppiumService(mobileConfig.appiumPort);
+      this.sharedAppiumExecutor = new AppiumExecutor(this.sharedAppiumService, mobileConfig);
+      this.sharedAppiumExecutor.setProjectPath(projectPath);
+    }
+
+    for (let i = 0; i < suite.testCases.length; i++) {
+      if (this.aborted) break;
+
+      const tcPath = suite.testCases[i];
+      const tcName = tcPath.replace(/\.groovy$/, '').replace(/^Test Cases\//, '');
+
+      onEvent('tcStart', { index: i, total: suite.testCases.length, name: tcName });
+
+      if (hasFailure && suite.stopOnFailure) {
+        results.push({
+          name: tcName, path: tcPath, status: 'skipped',
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          duration: 0, steps: [],
+        });
+        onEvent('tcComplete', { index: i, name: tcName, status: 'skipped', duration: 0 });
+        continue;
+      }
+
+      const tcResult = await this.executeTestCase(tcPath, tcName, projectPath, config, onEvent, mobileConfig, projectType);
+      results.push(tcResult);
+
+      if (tcResult.status === 'fail' || tcResult.status === 'error') {
+        hasFailure = true;
+      }
+
+      onEvent('tcComplete', {
+        index: i, name: tcName,
+        status: tcResult.status, duration: tcResult.duration,
+        error: tcResult.error,
+      });
+    }
+
+    const completedAt = new Date().toISOString();
+    const duration = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+
+    const statistics: SuiteStatistics = {
+      total: suite.testCases.length,
+      passed: results.filter(r => r.status === 'pass').length,
+      failed: results.filter(r => r.status === 'fail' || r.status === 'error').length,
+      skipped: results.filter(r => r.status === 'skipped').length,
+    };
+
+    const context: SuiteContext = {
+      hostName: os.hostname(),
+      os: `${os.type()} ${os.release()}`,
+    };
+
+    if (projectType === 'mobile' && mobileConfig) {
+      context.device = mobileConfig.deviceName;
+      context.platformVersion = mobileConfig.platformVersion;
+      context.appPackage = mobileConfig.appPackage;
+    } else {
+      context.browser = config.browser;
+      context.viewport = config.viewport ? `${config.viewport.width}x${config.viewport.height}` : '창 크기에 맞춤';
+    }
+
+    const suiteResult: SuiteResult = {
+      suiteName: suite.name,
+      status: statistics.failed > 0 ? 'fail' : 'pass',
+      startedAt, completedAt, duration, statistics,
+      testCaseResults: results, context,
+    };
+
+    // 스위트 완료 후 Appium 세션 정리
+    if (this.sharedAppiumExecutor) {
+      await this.sharedAppiumExecutor.closeSession();
+      this.sharedAppiumExecutor = null;
+      this.sharedAppiumService = null;
+    }
+
+    const reportPath = await generateReport(suiteResult, projectPath);
+
+    onEvent('suiteComplete', { result: suiteResult, reportPath });
+
+    return suiteResult;
+  }
+
+  private async executeTestCase(
+    tcPath: string,
+    tcName: string,
+    projectPath: string,
+    config: BrowserConfig,
+    onEvent: SuiteStepCallback,
+    mobileConfig?: MobileConfig,
+    projectType?: 'web' | 'mobile',
+  ): Promise<TestCaseResult> {
+    const startedAt = new Date().toISOString();
+    const executor = new ScriptExecutor();
+    this.currentExecutor = executor;
+
+    try {
+      const script = readFile(projectPath, tcPath);
+
+      const fileResolver = async (testCasePath: string) => {
+        const relPath = testCasePath.endsWith('.groovy') ? testCasePath : `${testCasePath}.groovy`;
+        return readFile(projectPath, relPath);
+      };
+
+      let result;
+
+      if (hasGroovyCode(script)) {
+        // Groovy Pipeline
+        const { cleanScript } = stripImports(script);
+        const groovyAst = parseGroovyScript(cleanScript);
+
+        // Load GlobalVariable
+        const globalVariables = this.loadGlobalVariables(projectPath);
+
+        // 공유 AppiumExecutor 사용 (스위트 레벨에서 생성됨) 또는 자동 감지
+        let appiumExecutor: AppiumExecutor | undefined = this.sharedAppiumExecutor || undefined;
+        if (!appiumExecutor) {
+          const hasMobileImport = /MobileBuiltInKeywords|Mobile\.(tap|setText|startExisting|closeApplication|verify|scroll|swipe|delay)/.test(script);
+          if (hasMobileImport) {
+            const mobCfg = mobileConfig || { platform: 'android' as const, appPackage: '', deviceUdid: '', deviceName: '', appiumPort: 4723, automationName: 'UiAutomator2', noReset: true, timeout: 30000 };
+            const appiumService = new AppiumService(mobCfg.appiumPort);
+            appiumExecutor = new AppiumExecutor(appiumService, mobCfg);
+            appiumExecutor.setProjectPath(projectPath);
+          }
+        }
+
+        const interpreter = new GroovyInterpreter(
+          executor, config,
+          (log) => { onEvent('stepLog', { tcName, ...log }); },
+          fileResolver,
+          globalVariables,
+          appiumExecutor,
+        );
+        result = await interpreter.execute(groovyAst);
+      } else {
+        // Legacy WebUI Pipeline
+        const { cleanScript } = preprocessScript(script);
+        const ast = parseScript(cleanScript);
+        const commands = mapToPlaywrightCommands(ast);
+        result = await executor.execute(commands, config, (log) => {
+          onEvent('stepLog', { tcName, ...log });
+        }, fileResolver);
+      }
+
+      const completedAt = new Date().toISOString();
+      return {
+        name: tcName, path: tcPath,
+        status: result.status === 'pass' ? 'pass' : 'fail',
+        startedAt, completedAt, duration: result.duration,
+        steps: result.steps,
+        error: result.error?.message,
+      };
+    } catch (err: any) {
+      const completedAt = new Date().toISOString();
+      return {
+        name: tcName, path: tcPath, status: 'error',
+        startedAt, completedAt,
+        duration: new Date(completedAt).getTime() - new Date(startedAt).getTime(),
+        steps: [], error: err.message,
+      };
+    }
+  }
+
+  async stop() {
+    this.aborted = true;
+    if (this.currentExecutor) {
+      await this.currentExecutor.stop();
+    }
+  }
+
+  private loadGlobalVariables(projectPath: string): Record<string, any> {
+    try {
+      const profilePath = path.join(projectPath, 'Profiles', 'default.profile.json');
+      if (!fs.existsSync(profilePath)) return {};
+      const content = fs.readFileSync(profilePath, 'utf-8');
+      const profile = JSON.parse(content);
+      return profile.variables || {};
+    } catch {
+      return {};
+    }
+  }
+}
