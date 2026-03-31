@@ -428,7 +428,7 @@ export class AppiumExecutor {
     }
 
     // 3. 휴리스틱 폴백
-    const lastSegment = testObjectPath.split('/').pop() || testObjectPath;
+    const lastSegment = testObjectPath.split(/[\/\\]/).pop() || testObjectPath;
     // Object Repository 경로에서 의미 있는 부분 추출
     const cleanName = lastSegment
       .replace(/^(button|input|linktext|text|label|icon)-?/i, '')
@@ -447,7 +447,7 @@ export class AppiumExecutor {
 
   private tryResolveFromObjectRepository(testObjectPath: string): { strategy: string; value: string } | null {
     // Remove 'Object Repository/' prefix if present
-    const cleanPath = testObjectPath.replace(/^Object Repository\//, '');
+    const cleanPath = testObjectPath.replace(/^Object Repository[\/\\]/, '');
     const rsFilePath = path.join(this.projectPath, 'Object Repository', `${cleanPath}.rs`);
 
     try {

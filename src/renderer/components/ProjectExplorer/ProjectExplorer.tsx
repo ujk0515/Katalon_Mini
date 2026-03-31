@@ -192,9 +192,10 @@ const TreeNode: React.FC<{
 
       if (node.type === 'folder') {
         // 폴더에 드롭 → 이동
-        const parentDir = data.path.substring(0, data.path.lastIndexOf('/'));
+        const lastSep = Math.max(data.path.lastIndexOf('/'), data.path.lastIndexOf('\\'));
+        const parentDir = data.path.substring(0, lastSep);
         if (parentDir === node.path) return;
-        if (data.type === 'folder' && node.path.startsWith(data.path + '/')) return;
+        if (data.type === 'folder' && (node.path.startsWith(data.path + '/') || node.path.startsWith(data.path + '\\'))) return;
         onDropOnFolder(node.path, data);
       } else {
         // 파일에 드롭 → 순서 변경
@@ -357,7 +358,7 @@ export const ProjectExplorer: React.FC = () => {
 
   const handleRenameSubmit = async (node: FileTreeNode, newName: string) => {
     if (!projectPath) return;
-    const parentDir = node.path.substring(0, node.path.lastIndexOf('/'));
+    const parentDir = node.path.substring(0, Math.max(node.path.lastIndexOf('/'), node.path.lastIndexOf('\\')));
     const ext = node.type === 'testcase' && !newName.endsWith('.groovy') ? '.groovy'
       : node.type === 'suite' && !newName.endsWith('.suite') ? '.suite' : '';
     const newPath = parentDir ? `${parentDir}/${newName}${ext}` : `${newName}${ext}`;
@@ -414,11 +415,11 @@ export const ProjectExplorer: React.FC = () => {
   const handleReorderDrop = async (targetPath: string, position: 'above' | 'below', dragData: { path: string; name: string; type: string }) => {
     if (!projectPath) return;
     // 같은 부모 폴더 내에서만 순서 변경
-    const dragParent = dragData.path.substring(0, dragData.path.lastIndexOf('/'));
-    const targetParent = targetPath.substring(0, targetPath.lastIndexOf('/'));
+    const dragParent = dragData.path.substring(0, Math.max(dragData.path.lastIndexOf('/'), dragData.path.lastIndexOf('\\')));
+    const targetParent = targetPath.substring(0, Math.max(targetPath.lastIndexOf('/'), targetPath.lastIndexOf('\\')));
     if (dragParent !== targetParent) return; // 다른 폴더면 무시
 
-    const targetName = targetPath.split('/').pop()!;
+    const targetName = targetPath.split(/[\/\\]/).pop()!;
     const dragName = dragData.name;
     const parentPath = dragParent;
 

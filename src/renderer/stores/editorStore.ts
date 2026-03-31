@@ -101,12 +101,12 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       openTabs: state.openTabs.map((t) => {
         // 정확히 일치하거나 하위 경로인 경우 업데이트 (폴더 이동 시)
         if (t.filePath === oldPath) {
-          const newName = newPath.split('/').pop() || t.name;
+          const newName = newPath.split(/[\/\\]/).pop() || t.name;
           return { ...t, filePath: newPath, name: newName, id: newPath };
         }
         if (t.filePath.startsWith(oldPath + '/')) {
           const newFilePath = newPath + t.filePath.slice(oldPath.length);
-          const newName = newFilePath.split('/').pop() || t.name;
+          const newName = newFilePath.split(/[\/\\]/).pop() || t.name;
           return { ...t, filePath: newFilePath, name: newName, id: newFilePath };
         }
         return t;
