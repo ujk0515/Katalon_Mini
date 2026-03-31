@@ -417,15 +417,17 @@ export const ProjectExplorer: React.FC = () => {
     const dragParent = dragData.path.substring(0, Math.max(dragData.path.lastIndexOf('/'), dragData.path.lastIndexOf('\\')));
     const targetParent = targetPath.substring(0, Math.max(targetPath.lastIndexOf('/'), targetPath.lastIndexOf('\\')));
 
-    // 다른 폴더 → 먼저 파일 이동
+    // 다른 폴더 → 파일 이동만 하고 끝
     if (dragParent !== targetParent) {
       const newPath = `${targetParent}/${dragData.name}`;
       const result = await api().moveFile({ projectPath, oldPath: dragData.path, newPath });
       if (!result.success) return;
       useEditorStore.getState().updateTabPath(dragData.path, newPath);
       await refreshTree();
+      return;
     }
 
+    // 같은 폴더 → 순서 변경
     const targetName = targetPath.split(/[\/\\]/).pop()!;
     const dragName = dragData.name;
     const parentPath = dragParent;
