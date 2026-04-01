@@ -156,7 +156,7 @@ export function registerScriptHandlers() {
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.SCRIPT_STOP, async () => {
+  ipcMain.handle(IPC_CHANNELS.SCRIPT_STOP, async (event) => {
     if (currentInterpreter) {
       currentInterpreter.stop();
       currentInterpreter = null;
@@ -165,6 +165,8 @@ export function registerScriptHandlers() {
       await currentExecutor.stop();
       currentExecutor = null;
     }
+    const win = BrowserWindow.fromWebContents(event.sender);
+    win?.webContents.send(IPC_CHANNELS.SCRIPT_STOPPED);
     return { success: true };
   });
 }

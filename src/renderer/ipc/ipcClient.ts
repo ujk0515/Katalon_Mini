@@ -26,6 +26,7 @@ declare global {
       onScriptLog: (callback: (data: any) => void) => () => void;
       onScriptComplete: (callback: (data: any) => void) => () => void;
       onScriptError: (callback: (data: any) => void) => () => void;
+      onScriptStopped: (callback: () => void) => () => void;
 
       // Suite
       executeSuite: (args: { suitePath: string; projectPath: string; browserConfig?: any; mobileConfig?: any; projectType?: string }) => Promise<void>;
@@ -33,6 +34,7 @@ declare global {
       onSuiteTcStart: (callback: (data: any) => void) => () => void;
       onSuiteTcComplete: (callback: (data: any) => void) => () => void;
       onSuiteComplete: (callback: (data: any) => void) => () => void;
+      onSuiteStopped: (callback: () => void) => () => void;
 
       // Shell
       openPath: (fullPath: string) => Promise<string>;

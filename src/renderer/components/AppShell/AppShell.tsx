@@ -12,8 +12,8 @@ import { api } from '../../ipc/ipcClient';
 
 export const AppShell: React.FC = () => {
   const { isLoaded } = useProjectStore();
-  const { addLog, setResult, setError, setRunning } = useExecutionStore();
-  const { onTcStart, onTcComplete, onStepLog, onSuiteComplete } = useSuiteStore();
+  const { addLog, setResult, setError, setRunning, onStopped } = useExecutionStore();
+  const { onTcStart, onTcComplete, onStepLog, onSuiteComplete, onSuiteStopped } = useSuiteStore();
 
   // Subscribe to IPC events from Main process
   useEffect(() => {
@@ -43,18 +43,23 @@ export const AppShell: React.FC = () => {
       setError(data);
     });
 
+    const unsubStopped = api().onScriptStopped(onStopped);
+
     // Suite events
     const unsubTcStart = api().onSuiteTcStart(onTcStart);
     const unsubTcComplete = api().onSuiteTcComplete(onTcComplete);
     const unsubSuiteComplete = api().onSuiteComplete(onSuiteComplete);
+    const unsubSuiteStopped = api().onSuiteStopped(onSuiteStopped);
 
     return () => {
       unsubLog();
       unsubComplete();
       unsubError();
+      unsubStopped();
       unsubTcStart();
       unsubTcComplete();
       unsubSuiteComplete();
+      unsubSuiteStopped();
     };
   }, []);
 

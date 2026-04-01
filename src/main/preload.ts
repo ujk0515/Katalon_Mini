@@ -38,6 +38,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on(IPC_CHANNELS.SCRIPT_ERROR, listener);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.SCRIPT_ERROR, listener);
   },
+  onScriptStopped: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on(IPC_CHANNELS.SCRIPT_STOPPED, listener);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.SCRIPT_STOPPED, listener);
+  },
 
   // Suite
   executeSuite: (args: any) => ipcRenderer.invoke(IPC_CHANNELS.SUITE_EXECUTE, args),
@@ -58,6 +63,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = (_event: any, data: any) => callback(data);
     ipcRenderer.on(IPC_CHANNELS.SUITE_COMPLETE, listener);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.SUITE_COMPLETE, listener);
+  },
+  onSuiteStopped: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on(IPC_CHANNELS.SUITE_STOPPED, listener);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.SUITE_STOPPED, listener);
   },
 
   // Shell

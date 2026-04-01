@@ -25,6 +25,7 @@ interface SuiteStore {
   onTcComplete: (data: SuiteTcCompleteEvent) => void;
   onStepLog: (data: any) => void;
   onSuiteComplete: (data: { result: SuiteResult; reportPath: string }) => void;
+  onSuiteStopped: () => void;
   reset: () => void;
 }
 
@@ -83,6 +84,24 @@ export const useSuiteStore = create<SuiteStore>((set, get) => ({
 
   onSuiteComplete: (data) => {
     set({ isRunning: false, suiteResult: data.result, reportPath: data.reportPath });
+  },
+
+  onSuiteStopped: () => {
+    set(state => {
+      const progress = [...state.tcProgress];
+      const running = progress.find(p => p.status === 'running');
+      if (running) {
+        running.status = 'skipped';
+        running.logs = [...running.logs, {
+          timestamp: new Date().toISOString(),
+          step: 0, total: 0,
+          command: '⏹ 사용자에 의해 스위트 실행이 중지되었습니다',
+          status: 'info' as any,
+          duration: 0,
+        }];
+      }
+      return { isRunning: false, tcProgress: progress };
+    });
   },
 
   reset: () => set({ isRunning: false, suiteResult: null, reportPath: null, tcProgress: [] }),

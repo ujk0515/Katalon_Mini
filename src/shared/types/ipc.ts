@@ -55,12 +55,14 @@ export const IPC_CHANNELS = {
   SCRIPT_LOG: 'script:log',
   SCRIPT_COMPLETE: 'script:complete',
   SCRIPT_ERROR: 'script:error',
+  SCRIPT_STOPPED: 'script:stopped',
   DIALOG_SELECT_DIR: 'dialog:selectDir',
   SUITE_EXECUTE: 'suite:execute',
   SUITE_STOP: 'suite:stop',
   SUITE_TC_START: 'suite:tcStart',
   SUITE_TC_COMPLETE: 'suite:tcComplete',
   SUITE_COMPLETE: 'suite:complete',
+  SUITE_STOPPED: 'suite:stopped',
   SHELL_OPEN_PATH: 'shell:openPath',
 
   // Mobile channels

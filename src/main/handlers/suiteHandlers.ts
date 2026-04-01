@@ -45,10 +45,12 @@ export function registerSuiteHandlers() {
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.SUITE_STOP, async () => {
+  ipcMain.handle(IPC_CHANNELS.SUITE_STOP, async (event) => {
     if (currentSuiteExecutor) {
       await currentSuiteExecutor.stop();
       currentSuiteExecutor = null;
+      const win = BrowserWindow.fromWebContents(event.sender);
+      win?.webContents.send(IPC_CHANNELS.SUITE_STOPPED);
     }
     return { success: true };
   });

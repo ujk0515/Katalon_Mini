@@ -25,6 +25,7 @@ interface ExecutionStore {
   addLog: (log: LogEntry) => void;
   setResult: (result: ExecutionResult) => void;
   setError: (error: any) => void;
+  onStopped: () => void;
   setRunning: (running: boolean) => void;
   setViewport: (viewport: BrowserConfig['viewport']) => void;
 }
@@ -58,7 +59,22 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
 
   stop: () => {
     api().stopScript();
-    // isRunning will be set to false when SCRIPT_COMPLETE/SCRIPT_ERROR event arrives
+  },
+
+  onStopped: () => {
+    const stoppedLog: LogEntry = {
+      timestamp: new Date().toISOString(),
+      step: 0,
+      total: 0,
+      command: '⏹ 사용자에 의해 스크립트 실행이 중지되었습니다',
+      status: 'info' as any,
+      lineNumber: 0,
+    };
+    set((state) => ({
+      logs: [...state.logs, stoppedLog],
+      isRunning: false,
+      result: null,
+    }));
   },
 
   clearLogs: () => set({ logs: [], result: null }),
