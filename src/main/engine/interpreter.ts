@@ -678,6 +678,11 @@ export class GroovyInterpreter {
       const duration = Date.now() - stepStart;
       const errMsg = err.message || String(err);
 
+      // abort에 의한 에러는 step 로그 없이 바로 전파
+      if (this.aborted) {
+        throw err;
+      }
+
       if (failureHandling === 'STOP_ON_FAILURE') {
         this.steps.push({
           index: this.stepIndex,

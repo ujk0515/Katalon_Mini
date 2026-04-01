@@ -17,6 +17,7 @@ import type { FileResolver } from '../engine/executor';
 
 let currentExecutor: ScriptExecutor | null = null;
 let currentInterpreter: GroovyInterpreter | null = null;
+let scriptStopped = false;
 
 export function registerScriptHandlers() {
   ipcMain.handle(IPC_CHANNELS.SCRIPT_EXECUTE, async (event, args) => {
@@ -36,6 +37,8 @@ export function registerScriptHandlers() {
         : `${testCasePath}.groovy`;
       return readFile(projectPath, relativePath);
     };
+
+    scriptStopped = false;
 
     try {
       // Detect Groovy mode
@@ -94,9 +97,11 @@ export function registerScriptHandlers() {
         );
 
         const result = await currentInterpreter.execute(groovyAst);
-        result.testCaseId = testCaseId;
-        result.testCaseName = testCaseId;
-        win?.webContents.send(IPC_CHANNELS.SCRIPT_COMPLETE, { result });
+        if (!scriptStopped) {
+          result.testCaseId = testCaseId;
+          result.testCaseName = testCaseId;
+          win?.webContents.send(IPC_CHANNELS.SCRIPT_COMPLETE, { result });
+        }
         currentExecutor = null;
         currentInterpreter = null;
 
@@ -134,29 +139,35 @@ export function registerScriptHandlers() {
           win?.webContents.send(IPC_CHANNELS.SCRIPT_LOG, log);
         }, fileResolver);
 
-        result.testCaseId = testCaseId;
-        result.testCaseName = testCaseId;
-        win?.webContents.send(IPC_CHANNELS.SCRIPT_COMPLETE, { result });
+        if (!scriptStopped) {
+          result.testCaseId = testCaseId;
+          result.testCaseName = testCaseId;
+          win?.webContents.send(IPC_CHANNELS.SCRIPT_COMPLETE, { result });
+        }
         currentExecutor = null;
       }
     } catch (err: any) {
       currentExecutor = null;
       currentInterpreter = null;
 
-      // Parse errors
-      const lineMatch = err.message?.match(/Line (\d+)/);
-      const colMatch = err.message?.match(/Col (\d+)/);
+      const isAborted = scriptStopped || err.message?.includes('Execution aborted');
+      if (!isAborted) {
+        // Parse errors
+        const lineMatch = err.message?.match(/Line (\d+)/);
+        const colMatch = err.message?.match(/Col (\d+)/);
 
-      win?.webContents.send(IPC_CHANNELS.SCRIPT_ERROR, {
-        message: err.message || String(err),
-        lineNumber: lineMatch ? parseInt(lineMatch[1]) : 0,
-        column: colMatch ? parseInt(colMatch[1]) : 0,
-        type: (err.message?.includes('Parse') || err.message?.includes('Lexer')) ? 'parse' : 'runtime',
-      });
+        win?.webContents.send(IPC_CHANNELS.SCRIPT_ERROR, {
+          message: err.message || String(err),
+          lineNumber: lineMatch ? parseInt(lineMatch[1]) : 0,
+          column: colMatch ? parseInt(colMatch[1]) : 0,
+          type: (err.message?.includes('Parse') || err.message?.includes('Lexer')) ? 'parse' : 'runtime',
+        });
+      }
     }
   });
 
   ipcMain.handle(IPC_CHANNELS.SCRIPT_STOP, async (event) => {
+    scriptStopped = true;
     if (currentInterpreter) {
       currentInterpreter.stop();
       currentInterpreter = null;
