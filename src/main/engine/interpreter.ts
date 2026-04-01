@@ -1077,6 +1077,10 @@ export class GroovyInterpreter {
             },
             getValue: () => d.getDay() === 0 ? 7 : d.getDay(),
           }),
+          format: (formatter: any) => {
+            if (typeof formatter === 'function') return formatter(d);
+            return String(formatter);
+          },
           toString: () => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
         };
       },
@@ -1085,13 +1089,17 @@ export class GroovyInterpreter {
     this.globalScope.declare('DateTimeFormatter', {
       ofPattern: (pattern: string) => {
         return (d: Date) => {
-          return pattern
-            .replace('yyyy', String(d.getFullYear()))
-            .replace('MM', String(d.getMonth() + 1).padStart(2, '0'))
-            .replace('dd', String(d.getDate()).padStart(2, '0'))
-            .replace('HH', String(d.getHours()).padStart(2, '0'))
-            .replace('mm', String(d.getMinutes()).padStart(2, '0'))
-            .replace('ss', String(d.getSeconds()).padStart(2, '0'));
+          let result = pattern;
+          result = result.replace('yyyy', String(d.getFullYear()));
+          result = result.replace('MM', String(d.getMonth() + 1).padStart(2, '0'));
+          result = result.replace('dd', String(d.getDate()).padStart(2, '0'));
+          result = result.replace('HH', String(d.getHours()).padStart(2, '0'));
+          // 'M'(단일)은 'MM' 치환 후 처리하여 충돌 방지
+          result = result.replace(/(?<!M)M(?!M)/g, String(d.getMonth() + 1));
+          result = result.replace(/(?<!d)d(?!d)/g, String(d.getDate()));
+          result = result.replace('mm', String(d.getMinutes()).padStart(2, '0'));
+          result = result.replace('ss', String(d.getSeconds()).padStart(2, '0'));
+          return result;
         };
       },
     });
