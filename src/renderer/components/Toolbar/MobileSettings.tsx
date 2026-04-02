@@ -10,6 +10,7 @@ export const MobileSettings: React.FC<MobileSettingsProps> = ({ isOpen, onClose 
   const { config, updateConfig } = useProjectStore();
   const mobile = config?.mobileConfig;
 
+  const [platform, setPlatform] = useState<'android' | 'ios'>(mobile?.platform || 'android');
   const [appPackage, setAppPackage] = useState(mobile?.appPackage || '');
   const [appActivity, setAppActivity] = useState(mobile?.appActivity || '');
   const [appiumPort, setAppiumPort] = useState(String(mobile?.appiumPort || 4723));
@@ -18,6 +19,7 @@ export const MobileSettings: React.FC<MobileSettingsProps> = ({ isOpen, onClose 
 
   useEffect(() => {
     if (mobile) {
+      setPlatform(mobile.platform || 'android');
       setAppPackage(mobile.appPackage || '');
       setAppActivity(mobile.appActivity || '');
       setAppiumPort(String(mobile.appiumPort || 4723));
@@ -34,6 +36,7 @@ export const MobileSettings: React.FC<MobileSettingsProps> = ({ isOpen, onClose 
         ...config,
         mobileConfig: {
           ...config.mobileConfig!,
+          platform,
           appPackage,
           appActivity: appActivity || undefined,
           appiumPort: parseInt(appiumPort) || 4723,
@@ -52,7 +55,18 @@ export const MobileSettings: React.FC<MobileSettingsProps> = ({ isOpen, onClose 
 
         <div className="space-y-3">
           <div>
-            <label className="block text-km-text-dim text-xs mb-1">App Package</label>
+            <label className="block text-km-text-dim text-xs mb-1">Platform</label>
+            <select
+              value={platform}
+              onChange={e => setPlatform(e.target.value as 'android' | 'ios')}
+              className="w-full px-2 py-1.5 bg-km-bg border border-km-border text-km-text text-sm rounded"
+            >
+              <option value="android">Android</option>
+              <option value="ios">iOS</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-km-text-dim text-xs mb-1">{platform === 'ios' ? 'Bundle ID' : 'App Package'}</label>
             <input
               value={appPackage}
               onChange={e => setAppPackage(e.target.value)}
